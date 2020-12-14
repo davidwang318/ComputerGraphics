@@ -1,32 +1,30 @@
-//[header]
-// A simple program to demonstrate how to implement Whitted-style ray-tracing
-//[/header]
-//[compile]
-// Download the whitted.cpp file to a folder.
-// Open a shell/terminal, and run the following command where the files is saved:
-//
-// c++ -o whitted whitted.cpp -std=c++11 -O3
-//
-// Run with: ./whitted. Open the file ./out.png in Photoshop or any program
-// reading PPM files.
-//[/compile]
-//[ignore]
-// Copyright (C) 2012  www.scratchapixel.com
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License for more details.
-//
-// You should have received a copy of the GNU General Public License
-// along with this program.  If not, see <http://www.gnu.org/licenses/>.
-//[/ignore]
+/**
+This program is originally implemented by:
 
+Copyright (C) 2012  www.scratchapixel.com
+including the basic algorithm of ray tracing
+
+and modified by:
+
+Lih-Narn Wang
+Master of Engineering in Robotics
+University of Maryland, College Park
+Email: ytcdavid@terpmail.umd.edu
+
+including:
+Anti-aliasing
+Box object
+Cylinder object
+Procedure texutures
+
+-------------------------------------------
+
+Running command:
+g++ whitted.cpp
+./a.out
+
+the result will be "out.ppm"
+**/
 
 #include <cstdio>
 #include <cstdlib>
@@ -37,10 +35,14 @@
 #include <iostream>
 #include <fstream>
 #include <cmath>
+#include <math.h>
 #include <limits>
 #include <cstring>
+#include <algorithm>
 
-#define PI 3.1415926
+#include "perlin.cpp"
+
+#define PI 3.14159265
 
 const float kInfinity = std::numeric_limits<float>::max();
 
@@ -131,26 +133,6 @@ public:
 
 enum MaterialType { DIFFUSE_AND_GLOSSY, REFLECTION_AND_REFRACTION, REFLECTION };
 
-class Object
-{
- public:
-    // diffuseColor: vec3f
-    Object(float ior_=1.3, float kd_=0.8, float ks_=0.2, 
-        Vec3f diffuseColor_=Vec3f(0.2), float specularExponent_=25) :
-        materialType(DIFFUSE_AND_GLOSSY),
-        ior(ior_), Kd(kd_), Ks(ks_), diffuseColor(diffuseColor_), specularExponent(specularExponent_) {}
-    virtual ~Object() {}
-    virtual bool intersect(const Vec3f &, const Vec3f &, float &, uint32_t &, Vec2f &) const = 0;
-    virtual void getSurfaceProperties(const Vec3f &, const Vec3f &, const uint32_t &, const Vec2f &, Vec3f &, Vec2f &) const = 0;
-    virtual Vec3f evalDiffuseColor(const Vec2f &) const { return diffuseColor; }
-    // material properties
-    MaterialType materialType;
-    float ior;
-    float Kd, Ks;
-    Vec3f diffuseColor;
-    float specularExponent;
-};
-
 bool solveQuadratic(const float &a, const float &b, const float &c, float &x0, float &x1)
 {
     float discr = b * b - 4 * a * c;
@@ -166,34 +148,6 @@ bool solveQuadratic(const float &a, const float &b, const float &c, float &x0, f
     if (x0 > x1) std::swap(x0, x1);
     return true;
 }
-
-class Sphere : public Object{
-public:
-    Sphere(const Vec3f &c, const float &r, float ior_=1.3, float kd_=0.8, float ks_=0.2, 
-        Vec3f diffuseColor_=Vec3f(0.2), float specularExponent_=25): center(c), radius(r), radius2(r * r)
-    , Object(ior_, kd_, ks_, diffuseColor_, specularExponent_){}
-    bool intersect(const Vec3f &orig, const Vec3f &dir, float &tnear, uint32_t &index, Vec2f &uv) const
-    {
-        // analytic solution
-        Vec3f L = orig - center;
-        float a = dotProduct(dir, dir);
-        float b = 2 * dotProduct(dir, L);
-        float c = dotProduct(L, L) - radius2;
-        float t0, t1;
-        if (!solveQuadratic(a, b, c, t0, t1)) return false;
-        if (t0 < 0) t0 = t1;
-        if (t0 < 0) return false;
-        tnear = t0;
-
-        return true;
-    }
-    
-    void getSurfaceProperties(const Vec3f &P, const Vec3f &I, const uint32_t &index, const Vec2f &uv, Vec3f &N, Vec2f &st) const
-    { N = normalize(P - center); }
-
-    Vec3f center;
-    float radius, radius2;
-};
 
 bool rayTriangleIntersect(
     const Vec3f &v0, const Vec3f &v1, const Vec3f &v2,
@@ -222,6 +176,108 @@ bool rayTriangleIntersect(
 
     return true;
 }
+
+class Object
+{
+ public:
+    Object(float ior_=1.3, float kd_=0.8, float ks_=0.2, 
+        Vec3f diffuseColor_=Vec3f(0.2), float specularExponent_=25) :
+        materialType(DIFFUSE_AND_GLOSSY),
+        ior(ior_), Kd(kd_), Ks(ks_), diffuseColor(diffuseColor_), specularExponent(specularExponent_) {}
+    virtual ~Object() {}
+    virtual bool intersect(const Vec3f &, const Vec3f &, float &, uint32_t &, Vec2f &) const = 0;
+    virtual void getSurfaceProperties(const Vec3f &, const Vec3f &, const uint32_t &, const Vec2f &, Vec3f &, Vec2f &) const = 0;
+    virtual Vec3f evalDiffuseColor(const Vec2f &) const { return diffuseColor; }
+    virtual bool intersectPlane(float& t, const Vec3f &n, const float &d, const Vec3f& orig, const Vec3f &dir) const{
+        float deno = dotProduct(n, dir);
+        if (deno == 0) return false;
+        t = (d - dotProduct(n, orig)) / deno;
+        return true; 
+    }
+
+    float chessBoard(const Vec2f &st) const {
+        float scale = 3;
+        return (fmodf(st.x * scale, 1) > 0.5) ^ (fmodf(st.y * scale, 1) > 0.5);
+    }
+
+    float perlin(const Vec2f &st, int freq) const {
+        return Perlin_Get2d(st.x, st.y, freq, 1);
+    }
+
+    float stripe(const Vec2f &st, int freq) const {
+        return sin(pow((st.x-0.5)*(st.x-0.5)+(st.y-0.5)*(st.y-0.5), 0.5) * freq * 2 * PI);
+    }
+
+    float perlinChessBoard(const Vec2f& st) const {
+        Vec2f stRev;
+        stRev.x = 1 - st.x;
+        stRev.y = 1 - st.y;
+        Vec2f st2;
+        st2.x = perlin(st, 10);
+        st2.y = perlin(stRev, 10);
+        return chessBoard(st2);
+    }
+
+    float perlinStripe(const Vec2f& st) const {
+        Vec2f stRev;
+        stRev.x = 1 - st.x;
+        stRev.y = 1 - st.y;
+        Vec2f st2;
+        st2.x = perlin(st, 10);
+        st2.y = perlin(stRev, 10);
+        return stripe(st2, 5);
+    }
+    // material properties
+    MaterialType materialType;
+    float ior;
+    float Kd, Ks;
+    Vec3f diffuseColor;
+    float specularExponent;
+};
+
+class Sphere : public Object{
+public:
+    Sphere(const Vec3f &c, const float &r, float ior_=1.3, float kd_=0.8, float ks_=0.2, 
+        Vec3f diffuseColor_=Vec3f(0.2), float specularExponent_=25): center(c), radius(r), radius2(r * r)
+    , Object(ior_, kd_, ks_, diffuseColor_, specularExponent_){}
+    bool intersect(const Vec3f &orig, const Vec3f &dir, float &tnear, uint32_t &index, Vec2f &uv) const
+    {
+        // analytic solution
+        Vec3f L = orig - center;
+        float a = dotProduct(dir, dir);
+        float b = 2 * dotProduct(dir, L);
+        float c = dotProduct(L, L) - radius2;
+        float t0, t1;
+        if (!solveQuadratic(a, b, c, t0, t1)) return false;
+        if (t0 < 0) t0 = t1;
+        if (t0 < 0) return false;
+        tnear = t0;
+
+        return true;
+    }
+    
+    void getSurfaceProperties(const Vec3f &P, const Vec3f &I, const uint32_t &index, const Vec2f &uv, Vec3f &N, Vec2f &st) const
+    { 
+    	N = normalize(P - center);
+    	st.x = 0.5 + atan2(N.x, N.z) / 2.0 / PI;
+    	st.y = 0.5 - asin(N.y) / PI;
+    	return;
+    }
+
+    Vec3f evalDiffuseColor(const Vec2f &st) const
+    {
+        Vec2f stx = Vec2f(st.x, st.x);
+        Vec2f sty = Vec2f(st.y, st.y);
+        auto pattern1 = perlin(stx, 10);
+        auto pattern2 = perlin(sty, 10);
+
+        return (mix(Vec3f(0.3, 0.9, 0.5), Vec3f(0., 1., 0.), sin(pattern1*10*PI)) 
+        + mix(Vec3f(0.733, 0.15, 0.24), Vec3f(0.47, 0.84, 0.93), cos(pattern2*10*PI))) / 2.0;
+    }
+
+    Vec3f center;
+    float radius, radius2;
+};
 
 class MeshTriangle : public Object
 {
@@ -280,19 +336,210 @@ public:
     }
 
     Vec3f evalDiffuseColor(const Vec2f &st) const
-    {
-        float scale = 5;
-        // float scale = 10;
-        float pattern = (fmodf(st.x * scale, 1) > 0.5) ^ (fmodf(st.y * scale, 1) > 0.5);
-        // float pattern = sin(pow(pow((st.x-0.5), 2) + pow((st.y-0.5), 2), 0.5)* scale * PI);
-        // return mix(Vec3f(0.815, 0.235, 0.031), Vec3f(0.937, 0.937, 0.231), pattern);
-        return mix(Vec3f(1., 1., 0.), Vec3f(0., 1., 1.), pattern);
-    }
+    { return mix(Vec3f(0., 0., 0.), Vec3f(1., 1., 1.), perlinStripe(st));}
 
     std::unique_ptr<Vec3f[]> vertices;
     uint32_t numTriangles;
     std::unique_ptr<uint32_t[]> vertexIndex;
     std::unique_ptr<Vec2f[]> stCoordinates;
+};
+
+class Box : public Object
+{
+public:
+    // Plane equatin: n*x = d
+    float dSlabX1, dSlabX2, dSlabY1, dSlabY2, dSlabZ1, dSlabZ2;
+    Vec3f centerPts, xAxis, yAxis, zAxis;
+    float l;
+
+    Box(const Vec3f centerPts, const float length,
+        const Vec3f xAxis, const Vec3f yAxis, const Vec3f zAxis):
+        centerPts(centerPts), xAxis(xAxis), yAxis(yAxis), zAxis(zAxis){            
+        l = length / 2;
+        dSlabX1 = dotProduct(centerPts - xAxis*l, xAxis);
+        dSlabX2 = dotProduct(centerPts + xAxis*l, xAxis);
+        dSlabY1 = dotProduct(centerPts - yAxis*l, yAxis);
+        dSlabY2 = dotProduct(centerPts + yAxis*l, yAxis);
+        dSlabZ1 = dotProduct(centerPts - zAxis*l, zAxis);
+        dSlabZ2 = dotProduct(centerPts + zAxis*l, zAxis);
+    }
+
+    bool intersect(const Vec3f &orig, const Vec3f &dir, float &tnear, uint32_t &index, Vec2f &uv) const{
+        float xDist = axisDistance(orig, xAxis), yDist = axisDistance(orig, yAxis), zDist = axisDistance(orig, zAxis);
+        // Special Case: Parallel to the surface and outside the box
+        if ((dotProduct(xAxis, dir) == 0 && xDist > l) ||
+            (dotProduct(yAxis, dir) == 0 && yDist > l) ||
+            (dotProduct(zAxis, dir) == 0 && zDist > l))
+            {return false;}
+        // General Case:
+        float xEnter{std::numeric_limits<float>::min()}, yEnter{xEnter}, zEnter{xEnter};
+        float xExit{std::numeric_limits<float>::max()}, yExit{xExit}, zExit{xExit};
+        float tEnter, tExit;
+        if(intersectPlane(xEnter, xAxis, dSlabX1, orig, dir) && intersectPlane(xExit, xAxis, dSlabX2, orig, dir)){
+            if (xEnter > xExit) std::swap(xEnter, xExit);
+        }
+        if(intersectPlane(yEnter, yAxis, dSlabY1, orig, dir) && intersectPlane(yExit, yAxis, dSlabY2, orig, dir)){
+            if (yEnter > yExit) std::swap(yEnter, yExit);
+        }
+        if(intersectPlane(zEnter, zAxis, dSlabZ1, orig, dir) && intersectPlane(zExit, zAxis, dSlabZ2, orig, dir)){
+            if (zEnter > zExit) std::swap(zEnter, zExit);
+        }
+        tEnter = std::max(std::max(xEnter, yEnter), zEnter);
+        tExit = std::min(std::min(xExit, yExit), zExit);
+        if(tEnter > tExit || tEnter < 0) {return false;}
+        tnear = tEnter;
+             
+        return true;
+    }
+
+    void getSurfaceProperties(const Vec3f &P, const Vec3f &I, const uint32_t &index, const Vec2f &uv, Vec3f &N, Vec2f &st) const
+    {
+        Vec3f diff = P - centerPts;
+        Vec3f diffNormal = normalize(diff);
+        float xDot = dotProduct(diff, xAxis), yDot = dotProduct(diff, yAxis), zDot = dotProduct(diff, zAxis);
+        float stx {0}, sty {0};
+        // Y-Z plane
+        if (std::abs(std::abs(xDot) - l) <= std::abs(std::abs(yDot) - l)
+            && std::abs(std::abs(xDot) - l) <= std::abs(std::abs(zDot) - l)){
+            N = xDot > 0? xAxis : -xAxis;
+            stx = yDot / l;
+            sty = zDot / l;
+        }
+        // X-Z plane
+        else if(std::abs(std::abs(yDot) - l) <= std::abs(std::abs(xDot) - l) 
+            && std::abs(std::abs(yDot) - l) <= std::abs(std::abs(zDot) - l)){
+            N = yDot > 0? yAxis : -yAxis;
+            stx = xDot / l;
+            sty = zDot / l;
+        }
+        // X-Y plane
+        else {
+            N = zDot > 0? zAxis : -zAxis;
+            stx = xDot / l;
+            sty = yDot / l;
+        }
+        st.x = (stx + 1) / 2.0;
+        st.y = (sty + 1) / 2.0;
+    }
+
+    Vec3f evalDiffuseColor(const Vec2f &st) const
+    {
+        float pattern1 = chessBoard(st);
+        float pattern2 = perlin(st, 10);
+
+        return (mix(Vec3f(0.25, 0.25, 0.), Vec3f(0., 0.25, 0.25), pattern1) 
+              + mix(Vec3f(0.75, 0.25, 0.75), Vec3f(0.83, 0.92, 0.3), pattern2)) / 2.0;
+    }
+private:
+
+    float axisDistance(const Vec3f &orig, const Vec3f &axis) const{
+        return std::abs(dotProduct((orig - centerPts), axis));
+    }
+};
+
+class Cylinder: public Object
+{
+public:
+    // Attributes:
+    Vec3f c1, c2, v, vNeg;
+    float r, dUp, dDown, h;
+    // Constructer:
+    Cylinder(const Vec3f& c1, const Vec3f& c2, float& r):c1(c1), c2(c2), r(r)  
+    {
+        auto diff = c2 - c1;
+        v = normalize(diff);
+        vNeg = -v;
+        h = pow(diff.x*diff.x + diff.y*diff.y + diff.z*diff.z, 0.5);
+        dUp = dotProduct(c2, v);
+        dDown = dotProduct(c1, -v);
+    }
+    bool intersect(const Vec3f &orig, const Vec3f &dir, float &tnear, uint32_t &index, Vec2f &uv) const{
+        std::vector<float> tCandidate;
+        // Intersection with the infinite cylinder
+        float tCylinderMin, tCylinderMax;
+        Vec3f pDiff = orig - c1;
+        Vec3f aVec = dir - dotProduct(dir, v)*v;
+        Vec3f cVec = pDiff - dotProduct(pDiff, v)*v;
+        float A = aVec.x*aVec.x + aVec.y*aVec.y + aVec.z*aVec.z;
+        float B = 2 * dotProduct(dir - dotProduct(dir, v)*v, pDiff - dotProduct(pDiff, v)*v);
+        float C = cVec.x*cVec.x + cVec.y*cVec.y + cVec.z*cVec.z - r*r;
+        bool cylinderIntersection = solveQuadratic(A, B, C, tCylinderMin, tCylinderMax);
+        if (!cylinderIntersection || tCylinderMax < 0){ 
+            return false;
+        }
+        else{
+            Vec3f hitPoint = orig + dir * tCylinderMin;
+            if(tCylinderMin > 0 && dotProduct(v, hitPoint - c1) > 0 && dotProduct(v, hitPoint - c2) < 0){
+                tCandidate.push_back(tCylinderMin);
+            }
+            hitPoint = orig + dir * tCylinderMax;
+            if(dotProduct(v, hitPoint - c1) > 0 && dotProduct(v, hitPoint - c2) < 0){
+                tCandidate.push_back(tCylinderMax);
+            }
+        }
+        // Intersection with the up & down cap
+        float tUpper = -1, tDown = -1;
+        bool upperIntersection = intersectPlane(tUpper, v, dUp, orig, dir);
+        bool downIntersection = intersectPlane(tDown, vNeg, dDown, orig, dir);
+        if (upperIntersection && tUpper >= 0){
+            auto d = (orig + tUpper * dir) - c2;
+            if (d.x*d.x + d.y*d.y + d.z*d.z <= r*r){
+                tCandidate.push_back(tUpper);
+            }
+        } 
+        if (downIntersection && tDown >= 0){
+            auto d = (orig + tDown * dir) - c1;
+            if (d.x*d.x + d.y*d.y + d.z*d.z <= r*r){
+                tCandidate.push_back(tDown);
+            }
+        }
+        // Return the smalles value
+        if (tCandidate.empty()) return false;
+        tnear = tCandidate.back(); tCandidate.pop_back();
+        for(const auto & t : tCandidate)
+            tnear = t < tnear? t : tnear;
+        return true;
+    }
+    void getSurfaceProperties(const Vec3f &P, const Vec3f &I, const uint32_t &index, const Vec2f &uv, Vec3f &N, Vec2f &st) const{
+        float error = 0.0000001;
+        float vDistance = std::abs(dotProduct(P - c1, v));
+        // Points on the down cap
+        if (vDistance < error) {
+            N = -v;
+            circleUVcalculation(P, c1, st); 
+            return;
+        }
+        // Points on the up cap
+        if (std::abs(vDistance - h) < error) {
+            N = v;
+            circleUVcalculation(P, c2, st); 
+            return;
+        }
+        // Points on the cylinder
+        auto diff = P - c1;
+        N = normalize(diff - dotProduct(diff, v)*v);
+        st.x = 0.5 + atan2(N.x, N.z) / 2.0 / PI;
+        st.y = vDistance;
+        return;
+    }
+
+    Vec3f evalDiffuseColor(const Vec2f &st) const
+    {
+        auto pattern1 = perlin(st, 10);
+        auto pattern2 = sin(pattern1 * 10 * PI);
+        auto pattern3 = cos(pattern2 * 10 * PI);
+        return mix(Vec3f(1., 1., 0.), Vec3f(0., 1., 1.), (1 + pattern3) / 2.0);
+    }
+private:
+    void circleUVcalculation(const Vec3f &P, const Vec3f &center, Vec2f&st) const {
+        // Vec3f coor = normalize(P - center);
+        // st.x = (0.5 * (pow(2 + 2 * coor.x * pow(2, 0.5) + coor.x * coor.x - coor.z * coor.z, 0.5) -
+        //                pow(2 - 2 * coor.x * pow(2, 0.5) + coor.x * coor.x - coor.z * coor.z, 0.5)) + 1) / 2.0;
+        // st.y = (0.5 * (pow(2 + 2 * coor.z * pow(2, 0.5) - coor.x * coor.x + coor.z * coor.z, 0.5) -
+        //                pow(2 - 2 * coor.z * pow(2, 0.5) - coor.x * coor.x + coor.z * coor.z, 0.5)) + 1) / 2.0;
+        st.x = 0;
+        st.y = 0;
+    }
 };
 
 // [comment]
@@ -415,6 +662,10 @@ bool trace(
 //
 // If the surface is duffuse/glossy we use the Phong illumation model to compute the color
 // at the intersection point.
+
+// get the hitpoint, take a vector from the sphere' 
+// s center to the hitpoint 
+// then take the normal 
 // [/comment]
 Vec3f castRay(
     const Vec3f &orig, const Vec3f &dir,
@@ -521,7 +772,6 @@ void render(
     float scale = tan(deg2rad(options.fov * 0.5));
     float imageAspectRatio = options.width / (float)options.height;
     Vec3f orig(0);
-    // float xOffset = 0.5, yOffset = 0.5;
     for (uint32_t j = 0; j < options.height; ++j) {
         for (uint32_t i = 0; i < options.width; ++i) {
             Vec3f colorbuffer(0); // the color buffer to deal with the aliasing problem
@@ -564,42 +814,58 @@ int main(int argc, char **argv)
     // creating the scene (adding objects and lights)
     std::vector<std::unique_ptr<Object>> objects;
     std::vector<std::unique_ptr<Light>> lights;
-    
-    Sphere *sph1 = new Sphere(Vec3f(-1, 0, -12), 2);
-    // Sphere *sph1 = new Sphere(Vec3f(-1, 0, -12), 4);
+
+    // Spheres
+    Sphere *sph1 = new Sphere(Vec3f(0, 0, -12), 2);
     sph1->materialType = DIFFUSE_AND_GLOSSY;
-    // sph1->diffuseColor = Vec3f(0.6, 0.7, 0.8);
-    sph1->diffuseColor = Vec3f(0.9, 0.5, 0.6); // q2_A
-    Sphere *sph2 = new Sphere(Vec3f(0.5, -0.5, -8), 1.5);
-    sph2->ior = 1.5;
-    // sph2->ior = 1.6;
-    sph2->materialType = REFLECTION_AND_REFRACTION;
-    
+    sph1->diffuseColor = Vec3f(0.9, 0.5, 0.6);
     objects.push_back(std::unique_ptr<Sphere>(sph1));
+
+    Sphere *sph2 = new Sphere(Vec3f(0.5, -2, -7), 0.5);
+    sph2->ior = 1.5;
+    sph2->materialType = REFLECTION_AND_REFRACTION;
     objects.push_back(std::unique_ptr<Sphere>(sph2));
 
+    // Plane
     Vec3f verts[4] = {{-5,-3,-6}, {5,-3,-6}, {5,-3,-16}, {-5,-3,-16}};
     uint32_t vertIndex[6] = {0, 1, 3, 1, 2, 3};
     Vec2f st[4] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
     MeshTriangle *mesh = new MeshTriangle(verts, vertIndex, 2, st);
     mesh->materialType = DIFFUSE_AND_GLOSSY;
-    
     objects.push_back(std::unique_ptr<MeshTriangle>(mesh));
 
-    lights.push_back(std::unique_ptr<Light>(new Light(Vec3f(-20, 70, 20), 0.5)));
-    lights.push_back(std::unique_ptr<Light>(new Light(Vec3f(30, 50, -12), 1)));
+    // Box
+    Vec3f xAxis = Vec3f(0.36, -0.8, 0.48);
+    Vec3f yAxis = Vec3f(0.48, 0.60, 0.64);
+    Vec3f zAxis = crossProduct(xAxis, yAxis);
+    Vec3f centerPts = Vec3f(3, -2, -7);
+    float length = 1.5;
+    Box* box1 = new Box(centerPts, length, xAxis, yAxis, zAxis);
+    box1->materialType = DIFFUSE_AND_GLOSSY;
+    box1->diffuseColor = Vec3f(0.1, 0.5, 0.9);
+    objects.push_back(std::unique_ptr<Box>(box1));
+
+    // Cylinder
+    Vec3f c1 = Vec3f(-2, -3, -7);
+    Vec3f c2 = Vec3f(-2, 2, -7);
+    float r = 0.5;
+    Cylinder* cylinder1 = new Cylinder(c1, c2, r);
+    cylinder1->materialType = DIFFUSE_AND_GLOSSY;
+    cylinder1->diffuseColor = Vec3f(0.5, 0.9, 0.7);
+    objects.push_back(std::unique_ptr<Cylinder>(cylinder1));
+
+    // Lights
+    lights.push_back(std::unique_ptr<Light>(new Light(Vec3f(-20, 70, 20), 0.5))); 
+    lights.push_back(std::unique_ptr<Light>(new Light(Vec3f(30, 50, -12), 1))); 
     
     // setting up options
     Options options;
     options.width = 640*2;
     options.height = 480*2;
     options.fov = 70;
-    options.backgroundColor = Vec3f(0, 0.5, 0);
-    options.maxDepth = 5;
-    options.bias = 1;
-    // options.backgroundColor = Vec3f(0.235294, 0.67451, 0.843137);
-    // options.maxDepth = 0;
-    // options.bias = 0.00001;
+    options.maxDepth = 10;
+    options.backgroundColor = Vec3f(0.235294, 0.67451, 0.843137);
+    options.bias = 0.001;
     
     // finally, render
     render(options, objects, lights);
